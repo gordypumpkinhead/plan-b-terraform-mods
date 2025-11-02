@@ -6,7 +6,9 @@ using BepInEx.Configuration;
 using HarmonyLib;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.UI;
@@ -31,6 +33,9 @@ namespace FeatMultiplayer
         static List<GameObject> mainMenuPanelClients = new();
         static List<string> mainMenuClientNames = new();
 
+        static string lastHostAddressText;
+        static string lastClientAddressText;
+
         [HarmonyPostfix]
         [HarmonyPatch(typeof(SSceneHome), "OnActivate")]
         static void Patch_SSceneHome_OnActivate()
@@ -39,6 +44,8 @@ namespace FeatMultiplayer
             {
                 return;
             }
+            lastHostAddressText = null;
+            lastClientAddressText = null;
             mainMenuPanel = new GameObject(Naming("MainMenuPanel"));
             
             var canvas = mainMenuPanel.AddComponent<Canvas>();
@@ -68,7 +75,8 @@ namespace FeatMultiplayer
 
             CreateText(mainMenuPanelBackground, Naming("MainMenuPanel_HostHeader"), SLoc.Get("FeatMultiplayer.ClientConfig"), fontSize.Value, Color.black);
 
-            mainMenuPanelClientAddress = CreateText(mainMenuPanelBackground, Naming("MainMenuPanel_HostIP"), SLoc.Get("FeatMultiplayer.ClientIP", clientConnectAddress.Value, clientPort.Value), fontSize.Value, Color.black);
+            var (_, clientDisplayAddress) = ResolveClientAddress();
+            mainMenuPanelClientAddress = CreateText(mainMenuPanelBackground, Naming("MainMenuPanel_HostIP"), SLoc.Get("FeatMultiplayer.ClientIP", clientDisplayAddress, clientPort.Value), fontSize.Value, Color.black);
 
             int j = 0;
             foreach (var kv in clientUsers)
@@ -104,6 +112,25 @@ namespace FeatMultiplayer
                 externalMap = null;
                 mainMenuPanelUPnPStatus.GetComponent<Text>().text = SLoc.Get("FeatMultiplayer.UPnPStatus", emp);
                 ApplyPreferredSize(mainMenuPanelUPnPStatus);
+            }
+
+            var hostAddressText = SLoc.Get("FeatMultiplayer.HostIP", GetHostLocalAddress(), hostPort.Value);
+            if (hostAddressText != lastHostAddressText)
+            {
+                lastHostAddressText = hostAddressText;
+                var hostTextComponent = mainMenuPanelHostIP.GetComponent<Text>();
+                hostTextComponent.text = hostAddressText;
+                ApplyPreferredSize(mainMenuPanelHostIP);
+            }
+
+            var (_, clientDisplayAddress) = ResolveClientAddress();
+            var clientAddressText = SLoc.Get("FeatMultiplayer.ClientIP", clientDisplayAddress, clientPort.Value);
+            if (clientAddressText != lastClientAddressText)
+            {
+                lastClientAddressText = clientAddressText;
+                var clientTextComponent = mainMenuPanelClientAddress.GetComponent<Text>();
+                clientTextComponent.text = clientAddressText;
+                ApplyPreferredSize(mainMenuPanelClientAddress);
             }
 
             var border = 5;
@@ -218,22 +245,27 @@ namespace FeatMultiplayer
 
         static string GetHostLocalAddress()
         {
-            var hostIp = hostServiceAddress.Value;
-            IPAddress hostIPAddress = IPAddress.Any;
-            if (hostIp == "default" || hostIp == "")
+            var value = hostServiceAddress.Value?.Trim() ?? "";
+            if (value.Length == 0
+                || string.Equals(value, "default", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase))
             {
-                hostIPAddress = GetMainIPv4();
+                return string.Join(", ", EnumerateLocalIPAddresses(AddressFamily.InterNetwork).Select(ip => ip.ToString()));
             }
-            else
-            if (hostIp == "defaultv6")
+            if (string.Equals(value, "defaultv6", StringComparison.OrdinalIgnoreCase))
             {
-                hostIPAddress = GetMainIPv6();
+                return string.Join(", ", EnumerateLocalIPAddresses(AddressFamily.InterNetworkV6).Select(ip => ip.ToString()));
             }
-            else
+            if (string.Equals(value, "loopback", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "localhost", StringComparison.OrdinalIgnoreCase))
             {
-                hostIPAddress = IPAddress.Parse(hostIp);
+                return IPAddress.Loopback.ToString();
             }
-            return hostIPAddress.ToString();
+            if (IPAddress.TryParse(value, out var parsed))
+            {
+                return parsed.ToString();
+            }
+            return IPAddress.Loopback.ToString();
         }
 
         static volatile string externalIP;
