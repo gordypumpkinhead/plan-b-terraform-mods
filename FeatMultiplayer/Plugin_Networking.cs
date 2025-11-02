@@ -94,38 +94,22 @@ namespace FeatMultiplayer
 
         static void HostAcceptor()
         {
-            var hostIp = hostServiceAddress.Value;
-            IPAddress hostIPAddress = IPAddress.Any;
-            if (hostIp == "")
-            {
-                hostIPAddress = IPAddress.Any;
-            }
-            else
-            if (hostIp == "default")
-            {
-                hostIPAddress = GetMainIPv4();
-            }
-            else
-            if (hostIp == "defaultv6")
-            {
-                hostIPAddress = GetMainIPv6();
-            }
-            else
-            {
-                try
-                {
-                    hostIPAddress = IPAddress.Parse(hostIp);
-                }
-                catch (Exception ex)
-                {
-                    LogError(ex);
-                    return;
-                }
-            }
-            LogInfo("Starting HostAcceptor on " + hostIp + ":" + hostPort.Value + " (" + hostIPAddress + ")");
+            var (hostIPAddress, hostDisplay) = ResolveHostAddress(hostServiceAddress.Value);
+            LogInfo("Starting HostAcceptor on " + hostDisplay + ":" + hostPort.Value);
             try
             {
                 TcpListener listener = new TcpListener(hostIPAddress, hostPort.Value);
+                if (hostIPAddress.AddressFamily == AddressFamily.InterNetworkV6)
+                {
+                    try
+                    {
+                        listener.Server.DualMode = true;
+                    }
+                    catch (SocketException ex)
+                    {
+                        LogWarning("Failed to enable dual mode for IPv6 host listener: " + ex.Message);
+                    }
+                }
                 listener.Start();
                 stopNetwork.Token.Register(listener.Stop);
                 stopHostAcceptor.Token.Register(listener.Stop);
@@ -152,6 +136,62 @@ namespace FeatMultiplayer
             }
         }
 
+        static (IPAddress address, string display) ResolveHostAddress(string configured)
+        {
+            var value = configured?.Trim() ?? "";
+            if (value.Length == 0)
+            {
+                var ipv4 = EnumerateLocalIPAddresses(AddressFamily.InterNetwork).Select(ip => ip.ToString()).ToList();
+                var ipv6 = EnumerateLocalIPAddresses(AddressFamily.InterNetworkV6).Select(ip => ip.ToString()).ToList();
+                var suffix = ipv6.Count != 0 ? "; IPv6: " + string.Join(", ", ipv6) : string.Empty;
+                return (IPAddress.Any, IPAddress.Any + " (any IPv4; available: " + string.Join(", ", ipv4) + suffix + ")");
+            }
+
+            if (string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                var ipv4 = GetMainIPv4();
+                if (ipv4 != null && !IPAddress.IsLoopback(ipv4))
+                {
+                    return (ipv4, ipv4 + " (auto)");
+                }
+                return (IPAddress.Any, IPAddress.Any + " (any IPv4)");
+            }
+
+            if (string.Equals(value, "loopback", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                return (IPAddress.Loopback, IPAddress.Loopback + " (loopback)");
+            }
+
+            if (string.Equals(value, "default", StringComparison.OrdinalIgnoreCase))
+            {
+                var ipv4 = GetMainIPv4();
+                if (ipv4 != null && !IPAddress.IsLoopback(ipv4))
+                {
+                    return (ipv4, ipv4 + " (default)");
+                }
+                return (IPAddress.Any, IPAddress.Any + " (any IPv4)");
+            }
+
+            if (string.Equals(value, "defaultv6", StringComparison.OrdinalIgnoreCase))
+            {
+                var ipv6 = GetMainIPv6();
+                if (ipv6 != null && !IPAddress.IsLoopback(ipv6))
+                {
+                    return (ipv6, ipv6 + " (defaultv6)");
+                }
+                return (IPAddress.IPv6Any, IPAddress.IPv6Any + " (any IPv6)");
+            }
+
+            if (IPAddress.TryParse(value, out var parsed))
+            {
+                return (parsed, parsed.ToString());
+            }
+
+            LogWarning("Invalid host ServiceAddress '" + configured + "', falling back to IPv4 any");
+            return (IPAddress.Any, IPAddress.Any + " (any IPv4)");
+        }
+
         static void ManageClient(TcpClient client)
         {
             LogDebug("Accepting client from " + client.Client.RemoteEndPoint);
@@ -174,17 +214,34 @@ namespace FeatMultiplayer
 
         static void ClientRunner()
         {
-            LogInfo("Client connecting to " + clientConnectAddress.Value + ":" + clientPort.Value);
+            var (effectiveAddress, displayAddress) = ResolveClientAddress();
+            LogInfo("Client connecting to " + effectiveAddress + ":" + clientPort.Value + " (configured " + displayAddress + ")");
 
             try
             {
-                var client = new TcpClient();
+                TcpClient client;
+                if (IPAddress.TryParse(effectiveAddress, out var parsed) && parsed.AddressFamily == AddressFamily.InterNetworkV6)
+                {
+                    client = new TcpClient(AddressFamily.InterNetworkV6);
+                    try
+                    {
+                        client.Client.DualMode = true;
+                    }
+                    catch (SocketException ex)
+                    {
+                        LogWarning("Failed to enable dual mode for IPv6 client socket: " + ex.Message);
+                    }
+                }
+                else
+                {
+                    client = new TcpClient();
+                }
                 hostSession.tcpClient = client;
 
 
                 stopNetwork.Token.Register(client.Close);
 
-                hostSession.tcpClient.Connect(clientConnectAddress.Value, clientPort.Value);
+                hostSession.tcpClient.Connect(effectiveAddress, clientPort.Value);
                 LogInfo("Client connection success");
 
                 Task.Factory.StartNew(() => ReceiverLoop(hostSession), TaskCreationOptions.LongRunning);
@@ -201,6 +258,61 @@ namespace FeatMultiplayer
                     LogError(ex);
                 }
             }
+        }
+
+        static (string effectiveAddress, string displayAddress) ResolveClientAddress()
+        {
+            var value = clientConnectAddress.Value?.Trim() ?? "";
+            if (value.Length == 0 || string.Equals(value, "localhost", StringComparison.OrdinalIgnoreCase))
+            {
+                var loopback = IPAddress.Loopback.ToString();
+                return (loopback, loopback + " (loopback)");
+            }
+
+            if (string.Equals(value, "loopback", StringComparison.OrdinalIgnoreCase))
+            {
+                var loopback = IPAddress.Loopback.ToString();
+                return (loopback, loopback + " (loopback)");
+            }
+
+            if (string.Equals(value, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                var auto = GetMainIPv4();
+                if (auto != null && !IPAddress.IsLoopback(auto))
+                {
+                    return (auto.ToString(), auto + " (auto)");
+                }
+                var loopback = IPAddress.Loopback.ToString();
+                return (loopback, loopback + " (auto)");
+            }
+
+            if (string.Equals(value, "default", StringComparison.OrdinalIgnoreCase))
+            {
+                var ipv4 = GetMainIPv4();
+                if (ipv4 != null)
+                {
+                    return (ipv4.ToString(), ipv4 + " (default)");
+                }
+            }
+
+            if (string.Equals(value, "defaultv6", StringComparison.OrdinalIgnoreCase))
+            {
+                var ipv6 = GetMainIPv6();
+                if (ipv6 != null)
+                {
+                    return (ipv6.ToString(), ipv6 + " (defaultv6)");
+                }
+                var loopback = IPAddress.IPv6Loopback.ToString();
+                return (loopback, loopback + " (defaultv6)");
+            }
+
+            if (IPAddress.TryParse(value, out var parsed) && IPAddress.IsLoopback(parsed))
+            {
+                var text = parsed.ToString();
+                return (text, text + " (loopback)");
+            }
+
+            return (value, value);
         }
 
         static void SenderLoop(ClientSession session)
@@ -456,21 +568,72 @@ namespace FeatMultiplayer
             ms.SetLength(0);
         }
 
-        static bool IsIPv4(IPAddress ipa) => ipa.AddressFamily == AddressFamily.InterNetwork;
+        static IEnumerable<IPAddress> EnumerateLocalIPAddresses(AddressFamily family)
+        {
+            List<IPAddress> result = new();
+            HashSet<string> seen = new();
 
-        static bool IsIPv6(IPAddress ipa) => ipa.AddressFamily == AddressFamily.InterNetworkV6;
+            foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (networkInterface.OperationalStatus != OperationalStatus.Up)
+                {
+                    continue;
+                }
 
-        static IPAddress GetMainIPv4() => NetworkInterface.GetAllNetworkInterfaces()
-            .Select((ni) => ni.GetIPProperties())
-            .Where((ip) => ip.GatewayAddresses.Where((ga) => IsIPv4(ga.Address)).Count() > 0)
-            .FirstOrDefault()?.UnicastAddresses?
-            .Where((ua) => IsIPv4(ua.Address))?.FirstOrDefault()?.Address;
+                if (networkInterface.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                {
+                    continue;
+                }
 
-        static IPAddress GetMainIPv6() => NetworkInterface.GetAllNetworkInterfaces()
-            .Select((ni) => ni.GetIPProperties())
-            .Where((ip) => ip.GatewayAddresses.Where((ga) => IsIPv6(ga.Address)).Count() > 0)
-            .FirstOrDefault()?.UnicastAddresses?
-            .Where((ua) => IsIPv6(ua.Address))?.FirstOrDefault()?.Address;
+                var properties = networkInterface.GetIPProperties();
+                foreach (var unicastAddress in properties.UnicastAddresses)
+                {
+                    var address = unicastAddress.Address;
+                    if (address.AddressFamily != family)
+                    {
+                        continue;
+                    }
+
+                    if (family == AddressFamily.InterNetwork)
+                    {
+                        var bytes = address.GetAddressBytes();
+                        if (bytes.Length > 1 && bytes[0] == 169 && bytes[1] == 254)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (family == AddressFamily.InterNetworkV6 && address.IsIPv6LinkLocal)
+                    {
+                        continue;
+                    }
+
+                    var key = address.ToString();
+                    if (seen.Add(key))
+                    {
+                        result.Add(address);
+                    }
+                }
+            }
+
+            if (result.Count == 0)
+            {
+                if (family == AddressFamily.InterNetwork)
+                {
+                    result.Add(IPAddress.Loopback);
+                }
+                else if (family == AddressFamily.InterNetworkV6)
+                {
+                    result.Add(IPAddress.IPv6Loopback);
+                }
+            }
+
+            return result;
+        }
+
+        static IPAddress GetMainIPv4() => EnumerateLocalIPAddresses(AddressFamily.InterNetwork).FirstOrDefault();
+
+        static IPAddress GetMainIPv6() => EnumerateLocalIPAddresses(AddressFamily.InterNetworkV6).FirstOrDefault();
 
 
         

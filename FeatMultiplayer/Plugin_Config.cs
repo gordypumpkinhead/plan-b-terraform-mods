@@ -55,7 +55,7 @@ namespace FeatMultiplayer
             useUPnP = Cfg("Host", "UseUPnP", false, "Use UPnP to automatically setup port forwarding on compatible networks/devices?");
 
             hostServiceAddress = Cfg("Host", "ServiceAddress", "", "The IP address of the adapter to use when hosting, in case of a multi-adapter system. Empty = auto");
-            clientConnectAddress = Cfg("Client", "ConnectAddress", "", "The IP address of the host to connect to.");
+            clientConnectAddress = Cfg("Client", "ConnectAddress", "127.0.0.1", "The IP address or host name of the host to connect to. Empty, localhost or auto will use the local loopback address.");
 
             hostPort = Cfg("Host", "Port", 23208, "The port number where the hosting will happen.");
             clientPort = Cfg("Client", "Port", 23208, "The port number where the hosting is.");
